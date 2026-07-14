@@ -1,0 +1,23 @@
+[theme]
+# 深色主题 - 专业数据风格（蓝绿色系，类似 Opta/StatsBomb）
+base = "dark"
+primaryColor = "#36CFC9"
+backgroundColor = "#0d1117"
+secondaryBackgroundColor = "#161b22"
+textColor = "#e6edf3"
+font = "sans serif"
+
+[server]
+# 服务器配置
+headless = true
+enableCORS = false
+enableXsrfProtection = true
+
+[browser]
+# 浏览器配置
+gatherUsageStats = false
+
+[client]
+# 客户端配置
+showErrorDetails = true
+toolbarMode = "minimal"
