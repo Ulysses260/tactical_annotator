@@ -690,10 +690,20 @@ def render_pitch_html(mark_x: float = -1, mark_y: float = -1, clickable: bool = 
             const svgP = pt.matrixTransform(svg.getScreenCTM().inverse());
             const x = Math.max(0, Math.min(100, (svgP.x / 400) * 100));
             const y = Math.max(0, Math.min(100, (svgP.y / 260) * 100));
+            const coords = {x: Math.round(x * 10) / 10, y: Math.round(y * 10) / 10};
+            // 方式1: Streamlit components.html 返回值协议
+            try {
+                window.parent.postMessage({
+                    isStreamlitMessage: true,
+                    type: "streamlit:setComponentValue",
+                    data: JSON.stringify(coords)
+                }, '*');
+            } catch(e) {}
+            // 方式2: 备用 postMessage
             window.parent.postMessage({
                 type: 'pitch_click',
-                x: Math.round(x * 10) / 10,
-                y: Math.round(y * 10) / 10
+                x: coords.x,
+                y: coords.y
             }, '*');
         }
         </script>
@@ -872,18 +882,19 @@ def render_team_settings():
 
         # 球员列表
         st.markdown("**球员名单**")
-        with st.expander(f"查看/编辑（{len(annotator.home_roster.players)}人）", expanded=False):
-            h_num_col, h_name_col, h_add_col = st.columns([1, 2, 1])
-            with h_num_col:
-                h_number = st.text_input("号码", key="home_add_num_v2", label_visibility="collapsed", placeholder="号")
-            with h_name_col:
-                h_name_p = st.text_input("姓名", key="home_add_name_v2", label_visibility="collapsed", placeholder="姓名")
-            with h_add_col:
-                if st.button("➕", key="home_add_btn_v2", use_container_width=True):
-                    if h_number or h_name_p:
-                        annotator.add_player("home", h_number, h_name_p)
-                        st.rerun()
+        # 添加球员控件放在 expander 外部，避免 Cloud 上 expander 内按钮失效
+        h_num_col, h_name_col, h_add_col = st.columns([1, 2, 1])
+        with h_num_col:
+            h_number = st.text_input("号码", key="home_add_num_v2", label_visibility="collapsed", placeholder="号")
+        with h_name_col:
+            h_name_p = st.text_input("姓名", key="home_add_name_v2", label_visibility="collapsed", placeholder="姓名")
+        with h_add_col:
+            if st.button("➕ 添加", key="home_add_btn_v2", use_container_width=True):
+                if h_number or h_name_p:
+                    annotator.add_player("home", h_number, h_name_p)
+                    st.rerun()
 
+        with st.expander(f"查看名单（{len(annotator.home_roster.players)}人）", expanded=False):
             for idx, player in enumerate(annotator.home_roster.players):
                 pcol1, pcol2, pcol3 = st.columns([1, 3, 1])
                 with pcol1:
@@ -906,18 +917,19 @@ def render_team_settings():
             annotator.away_color = away_color
 
         st.markdown("**球员名单**")
-        with st.expander(f"查看/编辑（{len(annotator.away_roster.players)}人）", expanded=False):
-            a_num_col, a_name_col, a_add_col = st.columns([1, 2, 1])
-            with a_num_col:
-                a_number = st.text_input("号码", key="away_add_num_v2", label_visibility="collapsed", placeholder="号")
-            with a_name_col:
-                a_name_p = st.text_input("姓名", key="away_add_name_v2", label_visibility="collapsed", placeholder="姓名")
-            with a_add_col:
-                if st.button("➕", key="away_add_btn_v2", use_container_width=True):
-                    if a_number or a_name_p:
-                        annotator.add_player("away", a_number, a_name_p)
-                        st.rerun()
+        # 添加球员控件放在 expander 外部，避免 Cloud 上 expander 内按钮失效
+        a_num_col, a_name_col, a_add_col = st.columns([1, 2, 1])
+        with a_num_col:
+            a_number = st.text_input("号码", key="away_add_num_v2", label_visibility="collapsed", placeholder="号")
+        with a_name_col:
+            a_name_p = st.text_input("姓名", key="away_add_name_v2", label_visibility="collapsed", placeholder="姓名")
+        with a_add_col:
+            if st.button("➕ 添加", key="away_add_btn_v2", use_container_width=True):
+                if a_number or a_name_p:
+                    annotator.add_player("away", a_number, a_name_p)
+                    st.rerun()
 
+        with st.expander(f"查看名单（{len(annotator.away_roster.players)}人）", expanded=False):
             for idx, player in enumerate(annotator.away_roster.players):
                 pcol1, pcol2, pcol3 = st.columns([1, 3, 1])
                 with pcol1:
@@ -1151,23 +1163,46 @@ with col_right:
         pitch_x = st.session_state.get("pitch_x", -1.0)
         pitch_y = st.session_state.get("pitch_y", -1.0)
 
-        # 战术板 - 使用 components.html 确保 SVG 正确渲染
+        # 战术板 - Bug3 修复：未设置位置时允许点击选点
         st.markdown("**🏟 战术位置**")
 
-        pitch_html_content = render_pitch_html(mark_x=pitch_x, mark_y=pitch_y, clickable=False)
-        components.html(pitch_html_content, height=320)
+        pitch_clickable = (pitch_x < 0)
+        pitch_html_content = render_pitch_html(mark_x=pitch_x, mark_y=pitch_y, clickable=pitch_clickable)
+        pitch_result = components.html(pitch_html_content, height=320)
+
+        # 监听球场点击事件（通过 components.html 返回值）
+        if pitch_result and isinstance(pitch_result, (dict, str)):
+            try:
+                if isinstance(pitch_result, str):
+                    pitch_data = json.loads(pitch_result)
+                else:
+                    pitch_data = pitch_result
+                if "x" in pitch_data and "y" in pitch_data:
+                    st.session_state.pitch_x = float(pitch_data["x"])
+                    st.session_state.pitch_y = float(pitch_data["y"])
+                    st.rerun()
+            except (json.JSONDecodeError, ValueError, TypeError):
+                pass
+
+        # 也检查 session_state 中是否有由桥接组件写入的点击坐标
+        if st.session_state.get("pitch_click_pending"):
+            click_data = st.session_state.pop("pitch_click_pending")
+            if isinstance(click_data, dict) and "x" in click_data and "y" in click_data:
+                st.session_state.pitch_x = float(click_data["x"])
+                st.session_state.pitch_y = float(click_data["y"])
+                st.rerun()
 
         if pitch_x >= 0:
             st.markdown(
-                f'<div class="pitch-info">X: {pitch_x:.1f} &nbsp;&nbsp; Y: {pitch_y:.1f}</div>',
+                f'<div class="pitch-info">📍 X: {pitch_x:.1f} &nbsp;&nbsp; Y: {pitch_y:.1f}</div>',
                 unsafe_allow_html=True,
             )
         else:
-            st.markdown('<div class="pitch-info">未设置位置</div>', unsafe_allow_html=True)
+            st.markdown('<div class="pitch-info">💡 点击球场图选择位置，或使用下方滑块</div>', unsafe_allow_html=True)
 
         # 坐标滑块
         if pitch_x < 0:
-            if st.button("📍 设置坐标位置", key="enable_position_v2", use_container_width=True):
+            if st.button("📍 设置坐标位置（默认中场）", key="enable_position_v2", use_container_width=True):
                 st.session_state.pitch_x = 50.0
                 st.session_state.pitch_y = 50.0
                 st.rerun()
@@ -1205,167 +1240,167 @@ with col_right:
 
         st.markdown('<div style="height: 12px;"></div>', unsafe_allow_html=True)
 
-        # 标注表单
-        with st.form(key=form_key, clear_on_submit=False):
-            # 时间戳
-            current_min = int(st.session_state.current_timestamp // 60)
-            current_sec = int(st.session_state.current_timestamp % 60)
-            video_label = current_video.label if current_video else "无"
-            st.markdown(
-                f"**⏱ 时间点：** `{current_min:02d}:{current_sec:02d}` "
-                f"<small style='color:#6b7280;'>[{video_label}]</small>",
-                unsafe_allow_html=True,
+        # --------------------------------------------------------
+        # 标注表单（Bug2 修复：不使用 st.form，改用独立按钮提交）
+        # --------------------------------------------------------
+
+        # 时间戳
+        current_min = int(st.session_state.current_timestamp // 60)
+        current_sec = int(st.session_state.current_timestamp % 60)
+        video_label = current_video.label if current_video else "无"
+        st.markdown(
+            f"**⏱ 时间点：** `{current_min:02d}:{current_sec:02d}` "
+            f"<small style='color:#6b7280;'>[{video_label}]</small>",
+            unsafe_allow_html=True,
+        )
+
+        # 事件类型
+        event_type = st.selectbox(
+            "事件类型 *",
+            EVENT_TYPES,
+            index=EVENT_TYPES.index(editing_ann.event_type) if editing_ann and editing_ann.event_type in EVENT_TYPES else 0,
+            key="form_event_type_v2",
+        )
+
+        # 队伍侧别 + 队伍名
+        team_col1, team_col2 = st.columns([1, 2])
+        with team_col1:
+            team_side_options = ["", "主队", "客队"]
+            current_side_label = {"home": "主队", "away": "客队", "": ""}.get(
+                editing_ann.team_side if editing_ann else "", ""
+            )
+            team_side_label = st.selectbox(
+                "队伍",
+                team_side_options,
+                index=team_side_options.index(current_side_label) if current_side_label in team_side_options else 0,
+                key="form_team_side_v2",
+            )
+            team_side = {"主队": "home", "客队": "away", "": ""}.get(team_side_label, "")
+
+        with team_col2:
+            default_team = editing_ann.team if editing_ann else ""
+            if team_side and not default_team:
+                default_team = annotator.home_roster.team_name if team_side == "home" else annotator.away_roster.team_name
+            team = st.text_input(
+                "队伍名称",
+                value=default_team,
+                key="form_team_v2",
             )
 
-            # 事件类型
-            event_type = st.selectbox(
-                "事件类型 *",
-                EVENT_TYPES,
-                index=EVENT_TYPES.index(editing_ann.event_type) if editing_ann and editing_ann.event_type in EVENT_TYPES else 0,
-                key="form_event_type_v2",
+        # 球员
+        st.markdown("**涉及球员**")
+        all_players = []
+        if team_side == "home":
+            all_players = annotator.home_roster.get_player_names()
+        elif team_side == "away":
+            all_players = annotator.away_roster.get_player_names()
+        else:
+            all_players = (
+                [f"[主] {p.display}" for p in annotator.home_roster.players] +
+                [f"[客] {p.display}" for p in annotator.away_roster.players]
             )
 
-            # 队伍侧别 + 队伍名
-            team_col1, team_col2 = st.columns([1, 2])
-            with team_col1:
-                team_side_options = ["", "主队", "客队"]
-                current_side_label = {"home": "主队", "away": "客队", "": ""}.get(
-                    editing_ann.team_side if editing_ann else "", ""
-                )
-                team_side_label = st.selectbox(
-                    "队伍",
-                    team_side_options,
-                    index=team_side_options.index(current_side_label) if current_side_label in team_side_options else 0,
-                    key="form_team_side_v2",
-                )
-                team_side = {"主队": "home", "客队": "away", "": ""}.get(team_side_label, "")
+        if all_players:
+            default_players = []
+            if editing_ann and editing_ann.players:
+                for p in editing_ann.players:
+                    if p in all_players:
+                        default_players.append(p)
+                    else:
+                        for ap in all_players:
+                            if p in ap:
+                                default_players.append(ap)
+                                break
 
-            with team_col2:
-                default_team = editing_ann.team if editing_ann else ""
-                if team_side and not default_team:
-                    default_team = annotator.home_roster.team_name if team_side == "home" else annotator.away_roster.team_name
-                team = st.text_input(
-                    "队伍名称",
-                    value=default_team,
-                    key="form_team_v2",
-                )
-
-            # 球员
-            st.markdown("**涉及球员**")
-            all_players = []
-            if team_side == "home":
-                all_players = annotator.home_roster.get_player_names()
-            elif team_side == "away":
-                all_players = annotator.away_roster.get_player_names()
-            else:
-                all_players = (
-                    [f"[主] {p.display}" for p in annotator.home_roster.players] +
-                    [f"[客] {p.display}" for p in annotator.away_roster.players]
-                )
-
-            if all_players:
-                default_players = []
-                if editing_ann and editing_ann.players:
-                    for p in editing_ann.players:
-                        if p in all_players:
-                            default_players.append(p)
-                        else:
-                            for ap in all_players:
-                                if p in ap:
-                                    default_players.append(ap)
-                                    break
-
-                selected_players = st.multiselect(
-                    "从名单选择",
-                    all_players,
-                    default=default_players,
-                    key="form_players_select_v2",
-                    label_visibility="collapsed",
-                )
-                players_input_text = st.text_input(
-                    "手动补充（逗号分隔）",
-                    value="",
-                    placeholder="其他球员，用逗号分隔",
-                    key="form_players_manual_v2",
-                )
-                players_list = selected_players + [p.strip() for p in players_input_text.split(",") if p.strip()]
-            else:
-                players_input_text = st.text_input(
-                    "涉及球员（逗号分隔）",
-                    value=",".join(editing_ann.players) if editing_ann else "",
-                    placeholder="在球队设置中添加球员名单后可下拉选择",
-                    key="form_players_v2",
-                )
-                players_list = [p.strip() for p in players_input_text.split(",") if p.strip()]
-
-            # 场区
-            tactic_zone = st.selectbox(
-                "场区",
-                [""] + TACTIC_ZONES,
-                index=(TACTIC_ZONES.index(editing_ann.tactic_zone) + 1) if editing_ann and editing_ann.tactic_zone in TACTIC_ZONES else 0,
-                key="form_zone_v2",
+            selected_players = st.multiselect(
+                "从名单选择",
+                all_players,
+                default=default_players,
+                key="form_players_select_v2",
+                label_visibility="collapsed",
             )
-
-            # 描述
-            description = st.text_area(
-                "事件描述",
-                value=editing_ann.description if editing_ann else "",
-                placeholder="简要描述本次战术事件...",
-                height=65,
-                key="form_desc_v2",
+            players_input_text = st.text_input(
+                "手动补充（逗号分隔）",
+                value="",
+                placeholder="其他球员，用逗号分隔",
+                key="form_players_manual_v2",
             )
-
-            # 备注
-            notes = st.text_area(
-                "备注",
-                value=editing_ann.notes if editing_ann else "",
-                placeholder="其他补充说明...",
-                height=45,
-                key="form_notes_v2",
+            players_list = selected_players + [p.strip() for p in players_input_text.split(",") if p.strip()]
+        else:
+            players_input_text = st.text_input(
+                "涉及球员（逗号分隔）",
+                value=",".join(editing_ann.players) if editing_ann else "",
+                placeholder="在球队设置中添加球员名单后可下拉选择",
+                key="form_players_v2",
             )
+            players_list = [p.strip() for p in players_input_text.split(",") if p.strip()]
 
-            # 提交按钮
-            submit_label = "✏️ 更新标注" if st.session_state.editing_id else "➕ 添加标注"
-            submitted = st.form_submit_button(submit_label, use_container_width=True)
+        # 场区
+        tactic_zone = st.selectbox(
+            "场区",
+            [""] + TACTIC_ZONES,
+            index=(TACTIC_ZONES.index(editing_ann.tactic_zone) + 1) if editing_ann and editing_ann.tactic_zone in TACTIC_ZONES else 0,
+            key="form_zone_v2",
+        )
 
-            if submitted:
-                if st.session_state.editing_id:
-                    success = annotator.edit_annotation(
-                        st.session_state.editing_id,
-                        event_type=event_type,
-                        team=team,
-                        team_side=team_side,
-                        players=players_list,
-                        tactic_zone=tactic_zone,
-                        description=description,
-                        notes=notes,
-                        x=st.session_state.get("pitch_x", -1.0),
-                        y=st.session_state.get("pitch_y", -1.0),
-                    )
-                    if success:
-                        st.success("✅ 标注已更新！")
-                        st.session_state.editing_id = None
-                        st.session_state.form_key += 1
-                        st.rerun()
-                else:
-                    ann = annotator.add_annotation(
-                        timestamp=st.session_state.current_timestamp,
-                        event_type=event_type,
-                        team=team,
-                        team_side=team_side,
-                        players=players_list,
-                        tactic_zone=tactic_zone,
-                        description=description,
-                        notes=notes,
-                        x=st.session_state.get("pitch_x", -1.0),
-                        y=st.session_state.get("pitch_y", -1.0),
-                        video_index=annotator.current_video_index,
-                    )
-                    st.success(f"✅ 已添加标注（{ann.formatted_time}）")
+        # 描述
+        description = st.text_area(
+            "事件描述",
+            value=editing_ann.description if editing_ann else "",
+            placeholder="简要描述本次战术事件...",
+            height=65,
+            key="form_desc_v2",
+        )
+
+        # 备注
+        notes = st.text_area(
+            "备注",
+            value=editing_ann.notes if editing_ann else "",
+            placeholder="其他补充说明...",
+            height=45,
+            key="form_notes_v2",
+        )
+
+        # 提交按钮（独立 st.button，不使用 st.form）
+        submit_label = "✏️ 更新标注" if st.session_state.editing_id else "➕ 添加标注"
+        if st.button(submit_label, use_container_width=True, key=f"submit_ann_{form_key}"):
+            if st.session_state.editing_id:
+                success = annotator.edit_annotation(
+                    st.session_state.editing_id,
+                    event_type=event_type,
+                    team=team,
+                    team_side=team_side,
+                    players=players_list,
+                    tactic_zone=tactic_zone,
+                    description=description,
+                    notes=notes,
+                    x=st.session_state.get("pitch_x", -1.0),
+                    y=st.session_state.get("pitch_y", -1.0),
+                )
+                if success:
+                    st.success("✅ 标注已更新！")
+                    st.session_state.editing_id = None
                     st.session_state.form_key += 1
-                    st.session_state.pitch_x = -1.0
-                    st.session_state.pitch_y = -1.0
                     st.rerun()
+            else:
+                ann = annotator.add_annotation(
+                    timestamp=st.session_state.current_timestamp,
+                    event_type=event_type,
+                    team=team,
+                    team_side=team_side,
+                    players=players_list,
+                    tactic_zone=tactic_zone,
+                    description=description,
+                    notes=notes,
+                    x=st.session_state.get("pitch_x", -1.0),
+                    y=st.session_state.get("pitch_y", -1.0),
+                    video_index=annotator.current_video_index,
+                )
+                st.success(f"✅ 已添加标注（{ann.formatted_time}）")
+                st.session_state.form_key += 1
+                st.session_state.pitch_x = -1.0
+                st.session_state.pitch_y = -1.0
+                st.rerun()
 
         # 取消编辑
         if st.session_state.editing_id:
