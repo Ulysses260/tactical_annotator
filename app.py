@@ -23,6 +23,8 @@ from video_annotator import (
     DEFAULT_AWAY_COLOR,
 )
 
+from custom_video_player import render_custom_video_player_html
+
 
 # ============================================================
 # 页面配置
@@ -707,12 +709,19 @@ def render_pitch_html(mark_x: float = -1, mark_y: float = -1, clickable: bool = 
                 padding: 0;
                 background: transparent;
                 overflow: hidden;
+                width: 100%;
+                height: 100%;
+                display: flex;
+                align-items: center;
+                justify-content: center;
             }}
             svg {{
                 width: 100%;
-                height: auto;
+                height: 100%;
+                max-height: 300px;
                 display: block;
                 cursor: {'crosshair' if clickable else 'default'};
+                object-fit: contain;
             }}
         </style>
     </head>
@@ -989,128 +998,77 @@ with col_video:
         tabs_html += '</div>'
         st.markdown(tabs_html, unsafe_allow_html=True)
 
-    # 视频播放器
+    # 视频播放器（自定义 HTML5 播放器，所有控制通过 JS 实现）
     if current_video and current_video.video_bytes:
-        st.markdown('<div class="video-panel">', unsafe_allow_html=True)
-        st.video(current_video.video_bytes)
-        st.markdown('</div>', unsafe_allow_html=True)
-    else:
-        st.markdown('''
-        <div class="video-placeholder">
-            <div class="icon">🎬</div>
-            <div class="title">上传比赛视频开始标注</div>
-            <div class="desc">
-                支持 MP4 / MOV / AVI / MKV / WEBM 格式<br>
-                可上传多段视频（上下半场等）<br>
-                点击顶部 "📹 上传视频" 按钮
-            </div>
-        </div>
-        ''', unsafe_allow_html=True)
+        # 将视频字节转换为 base64 data URL
+        import base64 as _b64
+        vid_b64 = _b64.b64encode(current_video.video_bytes).decode("utf-8")
+        # 根据文件扩展名确定 MIME 类型
+        _name_lower = current_video.name.lower()
+        if _name_lower.endswith('.webm'):
+            _mime = 'video/webm'
+        elif _name_lower.endswith('.ogg') or _name_lower.endswith('.ogv'):
+            _mime = 'video/ogg'
+        elif _name_lower.endswith('.mov'):
+            _mime = 'video/quicktime'
+        elif _name_lower.endswith('.mkv'):
+            _mime = 'video/x-matroska'
+        elif _name_lower.endswith('.avi'):
+            _mime = 'video/x-msvideo'
+        else:
+            _mime = 'video/mp4'
+        video_data_url = f"data:{_mime};base64,{vid_b64}"
 
-    # 标注时间轴
-    if current_video and current_video.video_bytes:
-        st.markdown('<div class="timeline-section">', unsafe_allow_html=True)
-        timeline_html = render_timeline_html(annotator.current_video_index)
-        st.markdown(timeline_html, unsafe_allow_html=True)
-        st.markdown('</div>', unsafe_allow_html=True)
+        # 构建标注点数据（用于时间轴显示）
+        anns_for_timeline = []
+        for ann in annotator.get_annotations_for_video(annotator.current_video_index):
+            color = get_team_color(ann.team_side) if ann.team_side else EVENT_COLORS.get(ann.event_type, "#8C8C8C")
+            anns_for_timeline.append({
+                "timestamp": ann.timestamp,
+                "timeText": ann.formatted_time,
+                "eventType": ann.event_type,
+                "team": ann.team,
+                "color": color,
+            })
 
-        # 播放控制栏
-        st.markdown('<div class="playback-controls">', unsafe_allow_html=True)
+        # seek_token - 每次从外部跳转时递增，触发组件重新加载并seek
+        if "video_seek_token" not in st.session_state:
+            st.session_state.video_seek_token = 0
 
-        # 第一行：倍速控制
-        st.markdown('<div class="pb-section-title">⏯ 播放控制</div>', unsafe_allow_html=True)
+        # 生成自定义视频播放器 HTML
+        player_html = render_custom_video_player_html(
+            video_data_url=video_data_url,
+            annotations_data=anns_for_timeline,
+            initial_time=st.session_state.current_timestamp,
+            initial_rate=st.session_state.playback_rate,
+            seek_token=st.session_state.video_seek_token,
+            duration=max(annotator.video_duration, 0.0),
+            mime_type=_mime,
+        )
 
-        speed_rates = [0.25, 0.5, 0.75, 1.0, 1.5, 2.0]
-        speed_cols = st.columns(len(speed_rates) + 2)
+        # 渲染视频播放器组件，并获取返回的时间数据
+        video_component_val = components.html(player_html, height=800, scrolling=False)
 
-        # 时间显示在中间
-        with speed_cols[0]:
-            st.markdown("")
-        with speed_cols[1]:
-            st.markdown("")
+        # 处理组件返回的时间数据（双向通信）
+        if video_component_val and isinstance(video_component_val, dict):
+            new_time = video_component_val.get("currentTime")
+            new_duration = video_component_val.get("duration", 0)
+            new_rate = video_component_val.get("playbackRate", 1.0)
+            action = video_component_val.get("action", "")
 
-        for i, rate in enumerate(speed_rates):
-            col_idx = i + 2
-            if col_idx < len(speed_cols):
-                with speed_cols[col_idx]:
-                    is_active = st.session_state.playback_rate == rate
-                    if st.button(f"{rate}x", key=f"speed_{rate}_v2", use_container_width=True,
-                                 type="primary" if is_active else "secondary"):
-                        st.session_state.playback_rate = rate
-                        st.rerun()
+            # 更新视频时长
+            if new_duration and new_duration > 0 and abs(new_duration - annotator.video_duration) > 1:
+                annotator.set_video_duration(new_duration)
 
-        # 第二行：跳转控制
-        st.markdown("")
-        ctrl_cols = st.columns([1, 1, 1.2, 1, 1])
+            # 更新当前时间（仅当差异较大时更新，避免频繁 rerun）
+            if new_time is not None and abs(new_time - st.session_state.current_timestamp) > 0.3:
+                st.session_state.current_timestamp = float(new_time)
 
-        with ctrl_cols[0]:
-            if st.button("⏮ -5s", key="back5_v2", use_container_width=True):
-                st.session_state.current_timestamp = max(0, st.session_state.current_timestamp - 5)
-                st.rerun()
+            # 更新倍速
+            if new_rate and abs(new_rate - st.session_state.playback_rate) > 0.01:
+                st.session_state.playback_rate = float(new_rate)
 
-        with ctrl_cols[1]:
-            if st.button("◀ -1s", key="back1_v2", use_container_width=True):
-                st.session_state.current_timestamp = max(0, st.session_state.current_timestamp - 1)
-                st.rerun()
-
-        with ctrl_cols[2]:
-            current_min = int(st.session_state.current_timestamp // 60)
-            current_sec = int(st.session_state.current_timestamp % 60)
-            st.markdown(
-                f'<div style="text-align:center; font-family:monospace; font-size:20px; '
-                f'font-weight:bold; color:#36CFC9; padding:4px 0; letter-spacing:2px;">'
-                f'{current_min:02d}:{current_sec:02d}'
-                f'</div>',
-                unsafe_allow_html=True,
-            )
-
-        with ctrl_cols[3]:
-            if st.button("▶ +1s", key="fwd1_v2", use_container_width=True):
-                st.session_state.current_timestamp += 1
-                st.rerun()
-
-        with ctrl_cols[4]:
-            if st.button("⏭ +5s", key="fwd5_v2", use_container_width=True):
-                st.session_state.current_timestamp += 5
-                st.rerun()
-
-        # 第三行：逐帧控制
-        st.markdown("")
-        frame_cols = st.columns([1, 1, 1, 1])
-        with frame_cols[0]:
-            if st.button("⏮ 上一帧", key="prev_frame_v2", use_container_width=True):
-                st.session_state.current_timestamp = max(0, st.session_state.current_timestamp - FRAME_DURATION)
-                st.rerun()
-        with frame_cols[1]:
-            if st.button("⏭ 下一帧", key="next_frame_v2", use_container_width=True):
-                st.session_state.current_timestamp += FRAME_DURATION
-                st.rerun()
-        with frame_cols[2]:
-            if st.button("📍 标注点", key="set_time_point_v2", use_container_width=True):
-                st.success(f"已设定：{format_time(st.session_state.current_timestamp)}")
-        with frame_cols[3]:
-            if st.button("🆕 新建", key="quick_new_v2", use_container_width=True):
-                st.session_state.editing_id = None
-                st.session_state.form_key += 1
-                st.session_state.pitch_x = -1.0
-                st.session_state.pitch_y = -1.0
-                st.rerun()
-
-        # 手动设置时间
-        with st.expander("⚙️ 手动设置时间", expanded=False):
-            time_col1, time_col2, time_col3 = st.columns(3)
-            with time_col1:
-                set_min = st.number_input("分钟", min_value=0, value=int(st.session_state.current_timestamp // 60), step=1, key="set_min_v2")
-            with time_col2:
-                set_sec = st.number_input("秒", min_value=0, max_value=59, value=int(st.session_state.current_timestamp % 60), step=1, key="set_sec_v2")
-            with time_col3:
-                set_ms = st.number_input("毫秒(10ms)", min_value=0, max_value=99,
-                                        value=int((st.session_state.current_timestamp % 1) * 100), step=1, key="set_ms_v2")
-            if st.button("应用时间", use_container_width=True, key="apply_time_v2"):
-                st.session_state.current_timestamp = set_min * 60 + set_sec + set_ms / 100
-                st.rerun()
-
-        # 多段视频管理
+        # 视频段管理（折叠面板）
         if len(annotator.video_segments) > 1:
             with st.expander("📹 视频段管理", expanded=False):
                 for i, seg in enumerate(annotator.video_segments):
@@ -1125,7 +1083,22 @@ with col_video:
                         if st.button("删除", key=f"del_seg_{i}_v2", use_container_width=True):
                             annotator.remove_video_segment(i)
                             st.rerun()
+    else:
+        st.markdown('''
+        <div class="video-placeholder">
+            <div class="icon">🎬</div>
+            <div class="title">上传比赛视频开始标注</div>
+            <div class="desc">
+                支持 MP4 / MOV / AVI / MKV / WEBM 格式<br>
+                可上传多段视频（上下半场等）<br>
+                点击顶部 "📹 上传视频" 按钮
+            </div>
+        </div>
+        ''', unsafe_allow_html=True)
 
+        st.markdown('<div class="playback-controls">', unsafe_allow_html=True)
+        st.markdown('<div class="pb-section-title">⏯ 播放控制</div>', unsafe_allow_html=True)
+        st.info("请先上传视频文件以启用播放控制")
         st.markdown('</div>', unsafe_allow_html=True)
 
 
@@ -1182,7 +1155,7 @@ with col_right:
         st.markdown("**🏟 战术位置**")
 
         pitch_html_content = render_pitch_html(mark_x=pitch_x, mark_y=pitch_y, clickable=False)
-        components.html(pitch_html_content, height=200)
+        components.html(pitch_html_content, height=320)
 
         if pitch_x >= 0:
             st.markdown(
@@ -1619,6 +1592,9 @@ with col_right:
                     if st.button("👁 跳转", key=f"goto_{ann.annotation_id}_v2", use_container_width=True):
                         annotator.switch_video(ann.video_index)
                         st.session_state.current_timestamp = ann.timestamp
+                        if "video_seek_token" not in st.session_state:
+                            st.session_state.video_seek_token = 0
+                        st.session_state.video_seek_token += 1
                         st.rerun()
                 with btn_col2:
                     if st.button("✏️ 编辑", key=f"edit_{ann.annotation_id}_v2", use_container_width=True):
